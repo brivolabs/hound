@@ -50,6 +50,7 @@ var ParamsFromUrl = function (params) {
         files: "",
         excludeFiles: "",
         repos: "*",
+        labels: "",
     };
     return ParamsFromQueryString(location.search, params);
 };
@@ -90,6 +91,17 @@ var Model = {
 
     RepoCount: function () {
         return Object.keys(this.repos).length;
+    },
+
+    // All distinct labels across repos, sorted.
+    Labels: function () {
+        var seen = {};
+        for (var name in this.repos) {
+            (this.repos[name].labels || []).forEach(function (label) {
+                seen[label] = true;
+            });
+        }
+        return Object.keys(seen).sort();
     },
 
     Load: function () {
@@ -298,7 +310,10 @@ var SearchBar = React.createClass({
     componentWillMount: function () {
         var _this = this;
         Model.didLoadRepos.tap(function (model, repos) {
-            _this.setState({ allRepos: Object.keys(repos) });
+            _this.setState({
+                allRepos: Object.keys(repos),
+                allLabels: model.Labels(),
+            });
         });
     },
 
@@ -321,6 +336,8 @@ var SearchBar = React.createClass({
             state: null,
             allRepos: [],
             repos: [],
+            allLabels: [],
+            labels: [],
         };
     },
     queryGotKeydown: function (event) {
@@ -402,9 +419,14 @@ var SearchBar = React.createClass({
             files: this.refs.files.getDOMNode().value.trim(),
             excludeFiles: this.refs.excludeFiles.getDOMNode().value.trim(),
             repos: repos.join(","),
+            labels: this.getLabels().join(","),
             i: this.refs.icase.getDOMNode().checked ? "fosho" : "nope",
             literal: this.refs.lsearch.getDOMNode().checked ? "fosho" : "nope",
         };
+    },
+    getLabels: function () {
+        // the labels field is only rendered when some repo has labels.
+        return this.refs.labels ? this.refs.labels.state.value || [] : [];
     },
     setParams: function (params) {
         var q = this.refs.q.getDOMNode(),
@@ -425,7 +447,8 @@ var SearchBar = React.createClass({
             this.refs.excludeFiles.getDOMNode().value.trim() !== "" ||
             this.refs.icase.getDOMNode().checked ||
             this.refs.lsearch.getDOMNode().checked ||
-            this.refs.repos.getDOMNode().value !== ""
+            this.refs.repos.getDOMNode().value !== "" ||
+            this.getLabels().length > 0
         );
     },
     isAdvancedEmpty: function () {
@@ -474,6 +497,40 @@ var SearchBar = React.createClass({
                 <RepoOption value={repoName} selected={selected[repoName]} />
             );
         });
+
+        var labelsField = "";
+        if (this.state.allLabels.length > 0) {
+            var selectedLabels = {};
+            this.state.labels.forEach(function (label) {
+                selectedLabels[label] = true;
+            });
+
+            labelsField = (
+                <div className="field">
+                    <label className="multiselect_label" htmlFor="labels">
+                        Labels
+                    </label>
+                    <div className="field-input">
+                        <select
+                            id="labels"
+                            className="form-control multiselect"
+                            multiple={true}
+                            size={Math.min(8, this.state.allLabels.length)}
+                            ref="labels"
+                        >
+                            {this.state.allLabels.map(function (label) {
+                                return (
+                                    <RepoOption
+                                        value={label}
+                                        selected={selectedLabels[label]}
+                                    />
+                                );
+                            })}
+                        </select>
+                    </div>
+                </div>
+            );
+        }
 
         var stats = this.state.stats;
         var statsView = "";
@@ -596,6 +653,7 @@ var SearchBar = React.createClass({
                                 </select>
                             </div>
                         </div>
+                        {labelsField}
                     </div>
                     <div className="ban" ref="ban" onClick={this.showAdvanced}>
                         <em>Advanced:</em> ignore case, filter by path, stuff
@@ -993,7 +1051,8 @@ var ResultView = React.createClass({
 var App = React.createClass({
     componentWillMount: function () {
         var params = ParamsFromUrl(),
-            repos = params.repos == "" ? [] : params.repos.split(",");
+            repos = params.repos == "" ? [] : params.repos.split(","),
+            labels = params.labels == "" ? [] : params.labels.split(",");
 
         this.setState({
             q: params.q,
@@ -1002,6 +1061,7 @@ var App = React.createClass({
             files: params.files,
             excludeFiles: params.excludeFiles,
             repos: repos,
+            labels: labels,
         });
 
         var _this = this;
@@ -1018,6 +1078,7 @@ var App = React.createClass({
             _this.refs.searchBar.setState({
                 stats: stats,
                 repos: repos,
+                labels: labels,
             });
 
             _this.refs.resultView.setState({
@@ -1066,7 +1127,9 @@ var App = React.createClass({
             "&excludeFiles=" +
             encodeURIComponent(params.excludeFiles) +
             "&repos=" +
-            params.repos;
+            params.repos +
+            "&labels=" +
+            encodeURIComponent(params.labels);
         history.pushState({ path: path }, "", path);
     },
     render: function () {

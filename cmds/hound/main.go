@@ -83,6 +83,7 @@ func defaultFlagForHost() string {
 func main() {
 	flagHost := flag.String("host", defaultFlagForHost(), "")
 	flagRepos := flag.String("repos", "*", "")
+	flagLabels := flag.String("labels", "", "")
 	flagFiles := flag.String("files", "", "")
 	flagContext := flag.Int("context", 2, "")
 	flagCase := flag.Bool("ignore-case", false, "")
@@ -116,6 +117,7 @@ func main() {
 	res, repos, err := client.SearchAndLoadRepos(&cfg,
 		flag.Arg(0),
 		*flagRepos,
+		*flagLabels,
 		*flagFiles,
 		*flagContext,
 		*flagCase,

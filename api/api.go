@@ -120,6 +120,32 @@ func parseAsRepoList(v string, idx map[string]*searcher.Searcher) []string {
 	return repos
 }
 
+// Narrows repos to those carrying at least one of the comma-separated labels
+// in v. An empty v leaves repos unchanged.
+func filterByLabels(repos []string, v string, idx map[string]*searcher.Searcher) []string {
+	want := map[string]bool{}
+	for _, label := range strings.Split(v, ",") {
+		if label = strings.TrimSpace(label); label != "" {
+			want[label] = true
+		}
+	}
+
+	if len(want) == 0 {
+		return repos
+	}
+
+	var filtered []string
+	for _, repo := range repos {
+		for _, label := range idx[repo].Repo.Labels {
+			if want[label] {
+				filtered = append(filtered, repo)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
 func parseAsUintValue(sv string, min, max, def uint) uint {
 	iv, err := strconv.ParseUint(sv, 10, 54)
 	if err != nil {
@@ -188,7 +214,13 @@ func Setup(m *http.ServeMux, idx map[string]*searcher.Searcher, defaultMaxResult
 		var opt index.SearchOptions
 
 		stats := parseAsBool(r.FormValue("stats"))
-		repos := parseAsRepoList(r.FormValue("repos"), idx)
+		reposValue, labels := r.FormValue("repos"), r.FormValue("labels")
+		// labels alone select from every repo, so `?q=foo&labels=bar` works
+		// without also passing repos=*.
+		if strings.TrimSpace(reposValue) == "" && strings.TrimSpace(labels) != "" {
+			reposValue = "*"
+		}
+		repos := filterByLabels(parseAsRepoList(reposValue, idx), labels, idx)
 		query := r.FormValue("q")
 		opt.Offset, opt.Limit = parseRangeValue(r.FormValue("rng"))
 		opt.FileRegexp = r.FormValue("files")

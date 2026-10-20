@@ -92,16 +92,17 @@ func doHttpGet(cfg *Config, uri string) (*http.Response, error) {
 }
 
 // Executes a search on the API running on host.
-func Search(r *Response, cfg *Config, pattern, repos, files string, context int, ignoreCase, stats bool) error {
+func Search(r *Response, cfg *Config, pattern, repos, labels, files string, context int, ignoreCase, stats bool) error {
 	u := fmt.Sprintf("http://%s/api/v1/search?%s",
 		cfg.Host,
 		url.Values{
-			"q":     {pattern},
-			"repos": {repos},
-			"files": {files},
-			"ctx":   {fmt.Sprintf("%d", context)},
-			"i":     {fmt.Sprintf("%t", ignoreCase)},
-			"stats": {fmt.Sprintf("%t", stats)},
+			"q":      {pattern},
+			"repos":  {repos},
+			"labels": {labels},
+			"files":  {files},
+			"ctx":    {fmt.Sprintf("%d", context)},
+			"i":      {fmt.Sprintf("%t", ignoreCase)},
+			"stats":  {fmt.Sprintf("%t", stats)},
 		}.Encode())
 
 	res, err := doHttpGet(cfg, u)
@@ -129,11 +130,11 @@ func LoadRepos(repos map[string]*config.Repo, cfg *Config) error {
 }
 
 // Execute a search and load the list of repositories in parallel on the host.
-func SearchAndLoadRepos(cfg *Config, pattern, repos, files string, context int, ignoreCase, stats bool) (*Response, map[string]*config.Repo, error) {
+func SearchAndLoadRepos(cfg *Config, pattern, repos, labels, files string, context int, ignoreCase, stats bool) (*Response, map[string]*config.Repo, error) {
 	chs := make(chan error)
 	var res Response
 	go func() {
-		chs <- Search(&res, cfg, pattern, repos, files, context, ignoreCase, stats)
+		chs <- Search(&res, cfg, pattern, repos, labels, files, context, ignoreCase, stats)
 	}()
 
 	chr := make(chan error)

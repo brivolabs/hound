@@ -55,6 +55,19 @@ var ParamsFromUrl = function (params) {
     return ParamsFromQueryString(location.search, params);
 };
 
+// Reads the selected options of a multiselect from the DOM. The select's own
+// React state only tracks changes made by the user, so it misses options
+// preselected from the URL.
+var SelectedValues = function (select) {
+    return [].filter
+        .call(select.options, function (option) {
+            return option.selected;
+        })
+        .map(function (option) {
+            return option.value;
+        });
+};
+
 var ParamValueToBool = function (v) {
     v = v.toLowerCase();
     return v == "fosho" || v == "true" || v == "1";
@@ -409,7 +422,9 @@ var SearchBar = React.createClass({
     getParams: function () {
         // selecting all repos is the same as not selecting any, so normalize the url
         // to have none.
-        var repos = Model.ValidRepos(this.refs.repos.state.value);
+        var repos = Model.ValidRepos(
+            SelectedValues(this.refs.repos.getDOMNode())
+        );
         if (repos.length == Model.RepoCount()) {
             repos = [];
         }
@@ -426,7 +441,9 @@ var SearchBar = React.createClass({
     },
     getLabels: function () {
         // the labels field is only rendered when some repo has labels.
-        return this.refs.labels ? this.refs.labels.state.value || [] : [];
+        return this.refs.labels
+            ? SelectedValues(this.refs.labels.getDOMNode())
+            : [];
     },
     setParams: function (params) {
         var q = this.refs.q.getDOMNode(),

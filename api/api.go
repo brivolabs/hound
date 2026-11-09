@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +52,21 @@ type searchResponse struct {
 	err  error
 }
 
+// One repo's results as the API returns them. Labels is always present, even
+// when empty, so a client can tell this server from one that doesn't support
+// labels and would have ignored the filter.
+type repoResult struct {
+	*index.SearchResponse
+	Labels []string
+}
+
+func labelsOf(srch *searcher.Searcher) []string {
+	if srch.Repo.Labels == nil {
+		return []string{}
+	}
+	return srch.Repo.Labels
+}
+
 /**
  * Searches all repos in parallel.
  */
@@ -61,7 +77,7 @@ func searchAll(
 	idx map[string]*searcher.Searcher,
 	filesOpened *int,
 	duration *int,
-) (map[string]*index.SearchResponse, error) {
+) (map[string]*repoResult, error) {
 	startedAt := time.Now()
 
 	n := len(repos)
@@ -75,7 +91,7 @@ func searchAll(
 		}(repo)
 	}
 
-	res := map[string]*index.SearchResponse{}
+	res := map[string]*repoResult{}
 	for i := 0; i < n; i++ {
 		r := <-ch
 		if r.err != nil {
@@ -86,7 +102,7 @@ func searchAll(
 			continue
 		}
 
-		res[r.repo] = r.res
+		res[r.repo] = &repoResult{r.res, labelsOf(idx[r.repo])}
 		*filesOpened += r.res.FilesOpened
 	}
 
@@ -144,6 +160,27 @@ func filterByLabels(repos []string, v string, idx map[string]*searcher.Searcher)
 		}
 	}
 	return filtered
+}
+
+// Returns the labels in v that no repo carries, and every label in use.
+func unknownLabels(v string, idx map[string]*searcher.Searcher) (unknown, known []string) {
+	inUse := map[string]bool{}
+	for _, srch := range idx {
+		for _, label := range srch.Repo.Labels {
+			inUse[label] = true
+		}
+	}
+	for label := range inUse {
+		known = append(known, label)
+	}
+	sort.Strings(known)
+
+	for _, label := range strings.Split(v, ",") {
+		if label = strings.TrimSpace(label); label != "" && !inUse[label] {
+			unknown = append(unknown, label)
+		}
+	}
+	return unknown, known
 }
 
 func parseAsUintValue(sv string, min, max, def uint) uint {
@@ -220,6 +257,16 @@ func Setup(m *http.ServeMux, idx map[string]*searcher.Searcher, defaultMaxResult
 		if strings.TrimSpace(reposValue) == "" && strings.TrimSpace(labels) != "" {
 			reposValue = "*"
 		}
+		// A misspelt label would otherwise match no repos and look exactly
+		// like a search that found nothing.
+		if unknown, known := unknownLabels(labels, idx); len(unknown) > 0 {
+			inUse := "no repo has labels"
+			if len(known) > 0 {
+				inUse = "labels in use: " + strings.Join(known, ", ")
+			}
+			writeError(w, fmt.Errorf("unknown label(s): %s (%s)", strings.Join(unknown, ", "), inUse), http.StatusOK)
+			return
+		}
 		repos := filterByLabels(parseAsRepoList(reposValue, idx), labels, idx)
 		query := r.FormValue("q")
 		opt.Offset, opt.Limit = parseRangeValue(r.FormValue("rng"))
@@ -249,7 +296,7 @@ func Setup(m *http.ServeMux, idx map[string]*searcher.Searcher, defaultMaxResult
 		}
 
 		var res struct {
-			Results map[string]*index.SearchResponse
+			Results map[string]*repoResult
 			Stats   *Stats `json:",omitempty"`
 		}
 

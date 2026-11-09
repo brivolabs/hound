@@ -136,16 +136,28 @@ func parseAsRepoList(v string, idx map[string]*searcher.Searcher) []string {
 	return repos
 }
 
-// Narrows repos to those carrying at least one of the comma-separated labels
-// in v. An empty v leaves repos unchanged.
-func filterByLabels(repos []string, v string, idx map[string]*searcher.Searcher) []string {
+func parseLabels(v string) map[string]bool {
 	want := map[string]bool{}
 	for _, label := range strings.Split(v, ",") {
 		if label = strings.TrimSpace(label); label != "" {
 			want[label] = true
 		}
 	}
+	return want
+}
 
+func sortedKeys(set map[string]bool) []string {
+	var keys []string
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// Narrows repos to those carrying at least one label in want. An empty want
+// leaves repos unchanged.
+func filterByLabels(repos []string, want map[string]bool, idx map[string]*searcher.Searcher) []string {
 	if len(want) == 0 {
 		return repos
 	}
@@ -162,25 +174,46 @@ func filterByLabels(repos []string, v string, idx map[string]*searcher.Searcher)
 	return filtered
 }
 
-// Returns the labels in v that no repo carries, and every label in use.
-func unknownLabels(v string, idx map[string]*searcher.Searcher) (unknown, known []string) {
+func labelsInUse(idx map[string]*searcher.Searcher) map[string]bool {
 	inUse := map[string]bool{}
 	for _, srch := range idx {
 		for _, label := range srch.Repo.Labels {
 			inUse[label] = true
 		}
 	}
-	for label := range inUse {
-		known = append(known, label)
-	}
-	sort.Strings(known)
+	return inUse
+}
 
-	for _, label := range strings.Split(v, ",") {
-		if label = strings.TrimSpace(label); label != "" && !inUse[label] {
+// Resolves the repos and labels query parameters to the repos to search.
+// Without repos, labels select from every repo. A label no repo carries, or
+// labels that match none of the named repos, is an error rather than an empty
+// result, which would look exactly like a search that found nothing.
+func selectRepos(reposValue, labelsValue string, idx map[string]*searcher.Searcher, inUse map[string]bool) ([]string, error) {
+	want := parseLabels(labelsValue)
+	if strings.TrimSpace(reposValue) == "" && len(want) > 0 {
+		reposValue = "*"
+	}
+
+	var unknown []string
+	for _, label := range sortedKeys(want) {
+		if !inUse[label] {
 			unknown = append(unknown, label)
 		}
 	}
-	return unknown, known
+	if len(unknown) > 0 {
+		hint := "no repo has labels"
+		if len(inUse) > 0 {
+			hint = "labels in use: " + strings.Join(sortedKeys(inUse), ", ")
+		}
+		return nil, fmt.Errorf("unknown label(s): %s (%s)", strings.Join(unknown, ", "), hint)
+	}
+
+	candidates := parseAsRepoList(reposValue, idx)
+	repos := filterByLabels(candidates, want, idx)
+	if len(candidates) > 0 && len(repos) == 0 {
+		return nil, fmt.Errorf("none of the selected repos has label(s): %s", strings.Join(sortedKeys(want), ", "))
+	}
+	return repos, nil
 }
 
 func parseAsUintValue(sv string, min, max, def uint) uint {
@@ -238,6 +271,8 @@ func parseRangeValue(rv string) (int, int) {
 }
 
 func Setup(m *http.ServeMux, idx map[string]*searcher.Searcher, defaultMaxResults int) {
+	inUse := labelsInUse(idx)
+
 	m.HandleFunc("/api/v1/repos", func(w http.ResponseWriter, r *http.Request) {
 		res := map[string]*config.Repo{}
 		for name, srch := range idx {
@@ -251,23 +286,11 @@ func Setup(m *http.ServeMux, idx map[string]*searcher.Searcher, defaultMaxResult
 		var opt index.SearchOptions
 
 		stats := parseAsBool(r.FormValue("stats"))
-		reposValue, labels := r.FormValue("repos"), r.FormValue("labels")
-		// labels alone select from every repo, so `?q=foo&labels=bar` works
-		// without also passing repos=*.
-		if strings.TrimSpace(reposValue) == "" && strings.TrimSpace(labels) != "" {
-			reposValue = "*"
-		}
-		// A misspelt label would otherwise match no repos and look exactly
-		// like a search that found nothing.
-		if unknown, known := unknownLabels(labels, idx); len(unknown) > 0 {
-			inUse := "no repo has labels"
-			if len(known) > 0 {
-				inUse = "labels in use: " + strings.Join(known, ", ")
-			}
-			writeError(w, fmt.Errorf("unknown label(s): %s (%s)", strings.Join(unknown, ", "), inUse), http.StatusOK)
+		repos, err := selectRepos(r.FormValue("repos"), r.FormValue("labels"), idx, inUse)
+		if err != nil {
+			writeError(w, err, http.StatusOK)
 			return
 		}
-		repos := filterByLabels(parseAsRepoList(reposValue, idx), labels, idx)
 		query := r.FormValue("q")
 		opt.Offset, opt.Limit = parseRangeValue(r.FormValue("rng"))
 		opt.FileRegexp = r.FormValue("files")

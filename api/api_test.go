@@ -65,7 +65,7 @@ func TestFilterByLabels(t *testing.T) {
 
 	for name, td := range tests {
 		t.Run(name, func(t *testing.T) {
-			got := filterByLabels(td.repos, td.labels, idx)
+			got := filterByLabels(td.repos, parseLabels(td.labels), idx)
 			sort.Strings(got)
 			if !reflect.DeepEqual(got, td.expected) {
 				t.Fatalf("filterByLabels(%v, %q) = %v; expected %v", td.repos, td.labels, got, td.expected)
@@ -74,32 +74,56 @@ func TestFilterByLabels(t *testing.T) {
 	}
 }
 
-func TestUnknownLabels(t *testing.T) {
+func TestSelectRepos(t *testing.T) {
 	idx := map[string]*searcher.Searcher{
 		"video-a":  {Repo: &config.Repo{Labels: []string{"video"}}},
 		"access-a": {Repo: &config.Repo{Labels: []string{"access"}}},
 		"none":     {Repo: &config.Repo{}},
 	}
-	known := []string{"access", "video"}
+	inUse := labelsInUse(idx)
 
 	tests := map[string]struct {
-		labels  string
-		unknown []string
+		repos    string
+		labels   string
+		expected []string
+		err      string
 	}{
-		"no labels":             {"", nil},
-		"known labels":          {"video, access", nil},
-		"misspelt label":        {"videos", []string{"videos"}},
-		"one unknown in a list": {"video,bogus", []string{"bogus"}},
-		"labels are case-exact": {"Video", []string{"Video"}},
+		"no repos no labels":         {"", "", nil, ""},
+		"repos without labels":       {"access-a,none", "", []string{"access-a", "none"}, ""},
+		"labels alone select all":    {"", "video, access", []string{"access-a", "video-a"}, ""},
+		"comma-only labels are none": {"", " , ", nil, ""},
+		"labels narrow named repos":  {"access-a,video-a", "video", []string{"video-a"}, ""},
+		"union keeps partial match":  {"access-a", "access,video", []string{"access-a"}, ""},
+		"misspelt label": {"", "videos", nil,
+			"unknown label(s): videos (labels in use: access, video)"},
+		"unknown labels deduped and sorted": {"", "video,zz,bogus,zz", nil,
+			"unknown label(s): bogus, zz (labels in use: access, video)"},
+		"labels are case-exact": {"", "Video", nil,
+			"unknown label(s): Video (labels in use: access, video)"},
+		"label not on named repos": {"access-a", "video", nil,
+			"none of the selected repos has label(s): video"},
 	}
 
 	for name, td := range tests {
 		t.Run(name, func(t *testing.T) {
-			unknown, gotKnown := unknownLabels(td.labels, idx)
-			if !reflect.DeepEqual(unknown, td.unknown) || !reflect.DeepEqual(gotKnown, known) {
-				t.Fatalf("unknownLabels(%q) = %v, %v; expected %v, %v", td.labels, unknown, gotKnown, td.unknown, known)
+			got, err := selectRepos(td.repos, td.labels, idx, inUse)
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			sort.Strings(got)
+			if !reflect.DeepEqual(got, td.expected) || gotErr != td.err {
+				t.Fatalf("selectRepos(%q, %q) = %v, %q; expected %v, %q", td.repos, td.labels, got, gotErr, td.expected, td.err)
 			}
 		})
+	}
+}
+
+func TestSelectReposWithoutLabelsInUse(t *testing.T) {
+	idx := map[string]*searcher.Searcher{"none": {Repo: &config.Repo{}}}
+	_, err := selectRepos("", "video", idx, labelsInUse(idx))
+	if err == nil || err.Error() != "unknown label(s): video (no repo has labels)" {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

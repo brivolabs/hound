@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -12,8 +13,15 @@ import (
 	"github.com/hound-search/hound/index"
 )
 
+// RepoResult is one repo's search results along with that repo's labels.
+type RepoResult struct {
+	*index.SearchResponse
+	Labels []string
+}
+
 type Response struct {
-	Results map[string]*index.SearchResponse
+	Results map[string]*RepoResult
+	Error   string `json:",omitempty"`
 	Stats   *struct {
 		FilesOpened int
 		Duration    int
@@ -115,7 +123,14 @@ func Search(r *Response, cfg *Config, pattern, repos, labels, files string, cont
 		return fmt.Errorf("status %d", res.StatusCode)
 	}
 
-	return json.NewDecoder(res.Body).Decode(r)
+	if err := json.NewDecoder(res.Body).Decode(r); err != nil {
+		return err
+	}
+	// The API reports search errors with a 200 status and an Error field.
+	if r.Error != "" {
+		return errors.New(r.Error)
+	}
+	return nil
 }
 
 // Load the list of repositories from the API running on host.

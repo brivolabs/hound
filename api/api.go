@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +52,21 @@ type searchResponse struct {
 	err  error
 }
 
+// One repo's results as the API returns them. Labels is always present, even
+// when empty, so a client can tell this server from one that doesn't support
+// labels and would have ignored the filter.
+type repoResult struct {
+	*index.SearchResponse
+	Labels []string
+}
+
+func labelsOf(srch *searcher.Searcher) []string {
+	if srch.Repo.Labels == nil {
+		return []string{}
+	}
+	return srch.Repo.Labels
+}
+
 /**
  * Searches all repos in parallel.
  */
@@ -61,7 +77,7 @@ func searchAll(
 	idx map[string]*searcher.Searcher,
 	filesOpened *int,
 	duration *int,
-) (map[string]*index.SearchResponse, error) {
+) (map[string]*repoResult, error) {
 	startedAt := time.Now()
 
 	n := len(repos)
@@ -75,7 +91,7 @@ func searchAll(
 		}(repo)
 	}
 
-	res := map[string]*index.SearchResponse{}
+	res := map[string]*repoResult{}
 	for i := 0; i < n; i++ {
 		r := <-ch
 		if r.err != nil {
@@ -86,7 +102,7 @@ func searchAll(
 			continue
 		}
 
-		res[r.repo] = r.res
+		res[r.repo] = &repoResult{r.res, labelsOf(idx[r.repo])}
 		*filesOpened += r.res.FilesOpened
 	}
 
@@ -120,16 +136,28 @@ func parseAsRepoList(v string, idx map[string]*searcher.Searcher) []string {
 	return repos
 }
 
-// Narrows repos to those carrying at least one of the comma-separated labels
-// in v. An empty v leaves repos unchanged.
-func filterByLabels(repos []string, v string, idx map[string]*searcher.Searcher) []string {
+func parseLabels(v string) map[string]bool {
 	want := map[string]bool{}
 	for _, label := range strings.Split(v, ",") {
 		if label = strings.TrimSpace(label); label != "" {
 			want[label] = true
 		}
 	}
+	return want
+}
 
+func sortedKeys(set map[string]bool) []string {
+	var keys []string
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// Narrows repos to those carrying at least one label in want. An empty want
+// leaves repos unchanged.
+func filterByLabels(repos []string, want map[string]bool, idx map[string]*searcher.Searcher) []string {
 	if len(want) == 0 {
 		return repos
 	}
@@ -144,6 +172,48 @@ func filterByLabels(repos []string, v string, idx map[string]*searcher.Searcher)
 		}
 	}
 	return filtered
+}
+
+func labelsInUse(idx map[string]*searcher.Searcher) map[string]bool {
+	inUse := map[string]bool{}
+	for _, srch := range idx {
+		for _, label := range srch.Repo.Labels {
+			inUse[label] = true
+		}
+	}
+	return inUse
+}
+
+// Resolves the repos and labels query parameters to the repos to search.
+// Without repos, labels select from every repo. A label no repo carries, or
+// labels that match none of the named repos, is an error rather than an empty
+// result, which would look exactly like a search that found nothing.
+func selectRepos(reposValue, labelsValue string, idx map[string]*searcher.Searcher, inUse map[string]bool) ([]string, error) {
+	want := parseLabels(labelsValue)
+	if strings.TrimSpace(reposValue) == "" && len(want) > 0 {
+		reposValue = "*"
+	}
+
+	var unknown []string
+	for _, label := range sortedKeys(want) {
+		if !inUse[label] {
+			unknown = append(unknown, label)
+		}
+	}
+	if len(unknown) > 0 {
+		hint := "no repo has labels"
+		if len(inUse) > 0 {
+			hint = "labels in use: " + strings.Join(sortedKeys(inUse), ", ")
+		}
+		return nil, fmt.Errorf("unknown label(s): %s (%s)", strings.Join(unknown, ", "), hint)
+	}
+
+	candidates := parseAsRepoList(reposValue, idx)
+	repos := filterByLabels(candidates, want, idx)
+	if len(candidates) > 0 && len(repos) == 0 {
+		return nil, fmt.Errorf("none of the selected repos has label(s): %s", strings.Join(sortedKeys(want), ", "))
+	}
+	return repos, nil
 }
 
 func parseAsUintValue(sv string, min, max, def uint) uint {
@@ -201,6 +271,8 @@ func parseRangeValue(rv string) (int, int) {
 }
 
 func Setup(m *http.ServeMux, idx map[string]*searcher.Searcher, defaultMaxResults int) {
+	inUse := labelsInUse(idx)
+
 	m.HandleFunc("/api/v1/repos", func(w http.ResponseWriter, r *http.Request) {
 		res := map[string]*config.Repo{}
 		for name, srch := range idx {
@@ -214,13 +286,11 @@ func Setup(m *http.ServeMux, idx map[string]*searcher.Searcher, defaultMaxResult
 		var opt index.SearchOptions
 
 		stats := parseAsBool(r.FormValue("stats"))
-		reposValue, labels := r.FormValue("repos"), r.FormValue("labels")
-		// labels alone select from every repo, so `?q=foo&labels=bar` works
-		// without also passing repos=*.
-		if strings.TrimSpace(reposValue) == "" && strings.TrimSpace(labels) != "" {
-			reposValue = "*"
+		repos, err := selectRepos(r.FormValue("repos"), r.FormValue("labels"), idx, inUse)
+		if err != nil {
+			writeError(w, err, http.StatusOK)
+			return
 		}
-		repos := filterByLabels(parseAsRepoList(reposValue, idx), labels, idx)
 		query := r.FormValue("q")
 		opt.Offset, opt.Limit = parseRangeValue(r.FormValue("rng"))
 		opt.FileRegexp = r.FormValue("files")
@@ -249,7 +319,7 @@ func Setup(m *http.ServeMux, idx map[string]*searcher.Searcher, defaultMaxResult
 		}
 
 		var res struct {
-			Results map[string]*index.SearchResponse
+			Results map[string]*repoResult
 			Stats   *Stats `json:",omitempty"`
 		}
 
